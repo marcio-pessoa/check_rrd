@@ -1,0 +1,430 @@
+#!/usr/bin/perl -w
+
+#
+# Bibliotecas
+#
+use lib qw( /usr/lib/perl5 );
+use RRDs;
+use POSIX;
+use POSIX qw(strftime);
+use strict;
+use warnings;
+use Switch;
+
+
+#
+# Definicao de variaveis
+#
+my $rrdfile = '';
+my $unit = '';
+my $factor = 1;
+my $engnotation = 1;
+my $quiet = 0;
+my $debug = 0;
+
+my $dataname1 = '';
+my $dataname2 = '';
+
+my @okay     = (0, 0);
+my @warning  = (0, 0);
+my @critical = (0, 0);
+
+my $round = '';
+
+my $timeout = 5;
+my $retries = 12;
+
+my $start;
+my ($st, $dummy, $data);
+my ($data1, $data2, $data1percent, $data2percent);
+
+my $OKAY     = 0;
+my $WARNING  = 1;
+my $CRITICAL = 2;
+my $UNKNOW   = 3;
+
+my $PerformanceData = 0;
+
+
+#
+# Get input options
+#
+
+# Recebe opcoes e parametros de entrada
+for (my $i = 0; $i < scalar(@ARGV); $i++) {
+    switch ($ARGV[$i]) {
+	case ("-h" ) {
+	    print(help());
+	    exit(0);
+	}
+	case ("-v" ) {
+	    print(version());
+	    exit(0);
+	}
+	case ("-f") {
+	    $rrdfile = checkrrdfile($ARGV[++$i]);
+	    if ($rrdfile eq ''){
+		print("Defina o arquivo.\n");
+		exit(1);
+	    }
+	    my $rrdfile = qw ($rrdfilepath);
+	}
+	case ("-u") {
+	    $unit = $ARGV[++$i];
+	}
+	case ("-m") {
+	    $factor = $ARGV[++$i];
+	}
+	case ("-e") {
+	    $engnotation = 0;
+	}
+	case ("-d") {
+	    $debug = 1;
+	}
+	case ("-d1") {
+		$dataname1 = $ARGV[++$i];
+	}
+	case ("-d2") {
+		$dataname2 = $ARGV[++$i];
+	}
+	case ("-o") {
+	    $okay[0] = $ARGV[++$i];
+	    $okay[1] = $ARGV[++$i];
+	}
+	case ("-w") {
+	    $warning[0] = $ARGV[++$i];
+	    $warning[1] = $ARGV[++$i];
+	}
+	case ("-c") {
+	    $critical[0] = $ARGV[++$i];
+	    $critical[1] = $ARGV[++$i];
+	}
+	case ("-R") {
+	    $round = $ARGV[++$i];
+	}
+	case ("-t") {
+	    $timeout = $ARGV[++$i];
+	}
+	case ("-r") {
+	    $retries = $ARGV[++$i];
+	}
+	case ("-q") {
+	    $quiet = 1;
+	}
+	case ("-p") {
+	    $PerformanceData = 1;
+	}
+	else {
+	    print(help());
+	    exit(1);
+	}
+    }
+}
+
+
+#
+# Check input options
+#
+
+# Check option --factor
+if($factor < 1){
+    print("Factor value invalid.\n");
+    exit(1);
+}
+if($factor > 1000){
+    print("Factor too large.\n");
+    exit(1);
+}
+
+# 
+if($dataname1 eq '' && $dataname2 eq ''){
+    print("A string name must be especified to d1 option.\n");
+    exit(1);
+}
+
+
+#
+# Read RRD file
+#
+
+# Extrai os dados do arquivo RRD
+# Esse laco serve para implementar um metodo de retries afim de esperar que o 
+# arquivo .rrd seja liberado pelo rrdtool para consulta.
+# O lado sera' repetido baseado na variavel $retries que e' definida pela
+# opcao de linha de comando -r ou --retries e o tempo esperado para uma nova
+# tentativa e' definido pela varivel $timeout, que por sua vez e' definida pela
+# opcao de linha de comando -t ou --timeout.
+for (my $i=0; $i < $retries; $i++) {
+    # Em modo de debug exibe o numero de tentativas.
+    if ($debug) {
+	print("Retry: $i\n");
+    }
+    # Resgata os valores do arquivo RRD
+    ($start, $st, $dummy, $data) = RRDs::fetch($rrdfile, "AVERAGE", "-s", "-300");
+    ($data1, $data2, $data1percent, $data2percent) = get_data(1, $data);
+
+    # Quando o arquivo conseguir ser lido, o laco sera' quebrado
+    if ( defined($data1) ) {
+	last;
+    }
+    # Enquanto o arquivo sera' aguardado um tempo definido pela variavel 
+    # $timeout, ate' que a variavel $retries se esgote.
+    else {
+	sleep($timeout);
+    }
+}
+
+
+# Modifica a variavel com o fator informado pelo usuario
+$data1 = $data1 * $factor;
+$data2 = $data2 * $factor;
+
+
+# Arredonda valores quando solicitado pela opcao -R na linha de comando
+switch ($round) {
+    # Arredonda para baixo
+    case ("floor") {
+	$data1 = floor($data1);
+	$data2 = floor($data2);
+    }
+    # Arredonda para cima
+    case ("ceil") {
+	$data1 = ceil($data1);
+	$data2 = ceil($data2);
+    }
+    # Arredonda valores
+    case ("round") {
+	$data1 = sprintf("%.0f", $data1);
+	$data2 = sprintf("%.0f", $data2);
+    }
+}
+
+
+# Verifica se devera usar notacao de engenharia
+my $pdata1 = 0;
+my $pdata2 = 0;
+if ($engnotation) {
+    $pdata1 = eng_string($data1);
+    $pdata2 = eng_string($data2);
+}
+else {
+    $pdata1 = $data1;
+    $pdata2 = $data2;
+}
+
+
+# 
+if ($dataname1 eq '') {
+    $data1 = $okay[0];
+}
+if ($dataname2 eq '') {
+    $data2 = $okay[1];
+}
+
+
+#
+# Retorna status
+#
+
+# Okay
+if ( (($data1 >= $okay[0]) && ($data1 <= $okay[1])) &&
+     (($data2 >= $okay[0]) && ($data2 <= $okay[1])) ) {
+    printstatus("Check OK", $dataname1, $dataname2, $pdata1, $pdata2, $unit, $PerformanceData),
+    exit($OKAY);
+}
+
+# Warning
+if ( (($data1 >= $warning[0]) && ($data1 <= $warning[1])) &&
+     (($data2 >= $warning[0]) && ($data2 <= $warning[1])) ) {
+    printstatus("Warning", $dataname1, $dataname2, $pdata1, $pdata2, $unit, $PerformanceData),
+    exit($WARNING);
+}
+
+# Critical
+if ( (($data1 >= $critical[0]) && ($data1 <= $critical[1])) &&
+     (($data2 >= $critical[0]) && ($data2 <= $critical[1])) ) {
+    printstatus("Critical", $dataname1, $dataname2, $pdata1, $pdata2, $unit, $PerformanceData),
+    exit($CRITICAL);
+}
+
+# Unknow
+else {
+    printstatus("Unknow data range", $dataname1, $dataname2, $pdata1, $pdata2, $unit, $PerformanceData),
+    exit($UNKNOW);
+}
+
+
+
+###############################################################################
+#
+# Functions
+#
+###############################################################################
+
+#
+# Exibe status
+#
+sub printstatus {
+	my ($status, $dataname1, $dataname2, $data1, $data2, $unit, $PerformanceData) = @_;
+
+	printf("%s: ", $status);
+	if ($dataname1 ne '') {
+		printf("%s = %s%s", $dataname1, $data1, $unit);
+	}
+	if ($dataname1 ne '' && $dataname2 ne '') {
+		printf(", ");
+	}
+	if ($dataname2 ne '') {
+		printf("%s = %s%s", $dataname2, $data2, $unit);
+	}
+
+	if ($PerformanceData == 1) {
+		if ($dataname1 ne "") {
+			printf(" | %s=%s;%i;%i", $dataname1, $data1, $warning[1], $critical[1]);
+		}
+		if ($dataname2 ne "") {
+			printf(", %s=%s;%i;%i ", $dataname2, $data2, $warning[2], $critical[2]);
+		}
+	}
+
+	printf("\n");
+}
+
+
+#
+# Verifica se o arquivo existe
+#
+sub checkrrdfile {
+    if (scalar(@_) != 0) { return($_[0]) }
+    else { return('') }
+}
+
+
+#
+# Importa informacoes do arquivo RRD
+#
+sub get_data {
+  my ($pix, $p1) = @_;
+  my @var = @$p1;
+  my $p = $var[0];
+  my ($data1, $data2) = @$p;
+
+  return ($data1, $data2);
+}
+
+
+#
+# Escreve numeros em notacao de engenharia (k,M,G)
+#
+sub eng_string {
+  my ($bps, $pad) = @_;
+  my $count = 0;
+  while ($bps >= 1000) {
+    $bps /= 1000;
+    $count++;
+  }
+  my $result = sprintf("%.1f", $bps);
+  if    ($count == 1) { $result .= "k"; }
+  elsif ($count == 2) { $result .= "M"; }
+  elsif ($count == 3) { $result .= "G"; }
+  while ($pad && length($result) < 6) {
+    $result = " ".$result;
+  }
+  return $result;
+}
+
+
+#
+# Help message
+#
+sub help {
+    return("Usage: check_rrd -f <file> -u [unit] -m [factor] -d1 [name] -d2 [name]
+                 -o <limit> -w <limit> -c <limit>
+Check rrd file to Nagios.
+
+Mandatory arguments to long options are mandatory for short options too.
+  -f,                    RRD File.
+
+  -u,                    Someting like bps, percent, %, units, chicken...
+
+  -m,                    Factor to use with results.
+                         When working witch network traffic, set this value to
+                         8, otherwise use 1 (default).
+
+  -e,                    Use this option to disable engineering notation (kMG),
+                         is usefull to print absolute numbers.
+
+  -d1,                   Name of first field on rrd file.
+  -d2,                   Name of second field on rrd file.
+                         If this value is null (''), data2 don't be displayed.
+
+  -o,                    Okay interval.
+  -w,                    Warning interval.
+  -c,                    Critical interval.
+  
+  -p                     Show performance data
+
+  -R                     Round collected values:
+                         round: round values to nearest integer.
+                         floor: round values to lowest integer.
+                         ceil:  round values to highest integer.
+
+  -t,                    Time used to wait avaliability of a rrd file.
+                         Sometimes is impossible to read files because it is in
+                         use by mrtg or rrd program.
+                         The default value is 5 seconds.
+  -r,                    Number of retries to read a rrd file.
+                         The default value is 12 seconds.
+
+  -d,                    Debug information.
+  -q,                    Don't display anything, only return a value.
+
+  -h,                    Display this help and exit.
+  -v,                    Output version information and exit.
+
+
+Examples:
+
+  Read a rrd file with partition disc percent information and return ok to
+  values between 0.1% and 70%, warning to 0.1%~80%, finaly return critical to
+  values between 0% and 100%.
+  In this case if value is zero the program will return critical interval too.
+
+  check_rrd -f disc.rrd -u \"%\" -d1 \"/\" -d2 \"/boot\" -o 0.1 80 -w 0.1 90 -c 0 100
+
+
+  Here the rrd file contain traffic information about an interface connected
+  to Internet on 1Mbps. The option -m is used to multiply data collected on 
+  files.
+
+  check_rrd -f eth1.rrd -u \"bps\" -d1 \"in\" -d2 \"out\" -m 8 \\
+            -o 1 500000 -w 1 800000 -c 0 1000000
+
+
+  This exemple is about a toner cartridge, look here -d2 option is omited, 
+  and the second value will not displayed.
+
+  check_rrd -f toner.rrd -u \"%\" -d1 \"Toner\" -o 40 100 -w 30 40 -c 30 0
+
+
+  An exemple about CPU usage.
+
+  check_rrd -f cpu.rrd -u \"%\" -d1 \"CPU\" -o 0 50 -w 50 80 -c 80 100
+
+Report bugs to <marcio.pessoa\@gmail.com.br>.\n\n");
+}
+
+
+#
+# Version message
+#
+sub version {
+    return("check_rrd 0.03b
+Written by Marcio Pessoa <marcio\@pessoa.eti.br>
+
+This script works with Perl and was tested with version 5.8.7;
+Running on Ubuntu LTS with kernel 2.6.15.
+
+This is free software; see the GNU license version 2 for copying conditions.
+There is NO warranty.\n");
+}
